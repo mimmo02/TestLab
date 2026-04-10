@@ -1,0 +1,11 @@
+# Ambiente virtuale
+venv/
+.venv/
+env/
+
+# File compilati di Python
+__pycache__/
+*.py[cod]
+
+# Database locale (opzionale, se non vuoi condividere i tuoi dati di test)
+db/*.sqlite
