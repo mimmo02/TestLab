@@ -1,6 +1,12 @@
 """
-TestLab — GUI standalone v2
+TestLab — GUI standalone v3
 Lancia con: python app.py   (dalla cartella testlab-code/)
+
+Fix v3:
+  1. Script registrati e salvati per progetto/testtype, compaiono nel menu laterale
+  2. Bottone Refresh nel pannello sinistro
+  3. Import run include 10 campi condizione + nota + tag
+  4. Campo tag nell'import run
 """
 from __future__ import annotations
 import json, os, subprocess, sys, threading, shutil
@@ -14,11 +20,14 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from testlab.core import TestLabDB, FileManager, PluginLoader, ProjectConfig
 
-CODE_ROOT    = ROOT
-DATA_ROOT    = ROOT.parent / "testlab-data"
-DB_PATH      = ROOT / "db" / "testlab.sqlite"
-SCRIPTS_DIR  = ROOT / "scripts"
+CODE_ROOT     = ROOT
+DATA_ROOT     = ROOT.parent / "testlab-data"
+DB_PATH       = ROOT / "db" / "testlab.sqlite"
+SCRIPTS_DIR   = ROOT / "scripts"
 SETTINGS_PATH = ROOT / "db" / "settings.json"
+# Registry degli script per progetto/testtype (salvato in db/scripts.json)
+SCRIPTS_REG_PATH = ROOT / "db" / "scripts_registry.json"
+
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 db     = TestLabDB(DB_PATH)
@@ -26,7 +35,7 @@ loader = PluginLoader(SCRIPTS_DIR)
 fm     = FileManager(CODE_ROOT, DATA_ROOT, db)
 
 # ── settings ──────────────────────────────────────────────────────────────────
-_DEF = {"matlab_exe": "", "export_folder": str(CODE_ROOT/"exports"),
+_DEF = {"matlab_exe": "", "export_folder": str(CODE_ROOT / "exports"),
         "export_format": "PNG", "export_dpi": "150"}
 
 def load_settings():
@@ -40,6 +49,27 @@ def save_settings(s):
     SETTINGS_PATH.write_text(json.dumps(s, indent=2))
 
 SETTINGS = load_settings()
+
+# ── scripts registry ──────────────────────────────────────────────────────────
+# Struttura: { "project/testtype": {"analysis": "/path/script.py", "compare": "/path/..."} }
+def load_scripts_registry() -> dict:
+    if SCRIPTS_REG_PATH.exists():
+        try: return json.loads(SCRIPTS_REG_PATH.read_text())
+        except Exception: pass
+    return {}
+
+def save_scripts_registry(reg: dict):
+    SCRIPTS_REG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCRIPTS_REG_PATH.write_text(json.dumps(reg, indent=2))
+
+def get_scripts(project: str, testtype: str) -> dict:
+    reg = load_scripts_registry()
+    return reg.get(f"{project}/{testtype}", {"analysis": "", "compare": ""})
+
+def set_scripts(project: str, testtype: str, analysis: str, compare: str):
+    reg = load_scripts_registry()
+    reg[f"{project}/{testtype}"] = {"analysis": analysis, "compare": compare}
+    save_scripts_registry(reg)
 
 # ── constants ─────────────────────────────────────────────────────────────────
 COND_FIELDS = [f"Cond {i}" for i in range(1, 11)]
@@ -56,13 +86,20 @@ def _btn(parent, text, cmd, color=None, width=None):
     if width: kw["width"] = width
     return tk.Button(parent, text=text, command=cmd, **kw)
 
+def _small_btn(parent, text, cmd, color=None):
+    return tk.Button(parent, text=text, command=cmd,
+                     bg=color or C["gray"], fg="white", relief="flat",
+                     font=("Helvetica", 8, "bold"), padx=4, pady=2,
+                     cursor="hand2", activeforeground="white",
+                     activebackground=color or C["gray"])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LogBox
 # ══════════════════════════════════════════════════════════════════════════════
 class LogBox:
-    _TAGS = {"info": ("#185FA5","ℹ"), "success": ("#3B6D11","✓"),
-             "warning": ("#854F0B","⚠"), "error": ("#A32D2D","✗")}
+    _TAGS = {"info": ("#185FA5", "ℹ"), "success": ("#3B6D11", "✓"),
+             "warning": ("#854F0B", "⚠"), "error": ("#A32D2D", "✗")}
 
     def __init__(self, parent, height=6):
         self.frame = tk.Frame(parent, bg=C["bg"])
@@ -75,7 +112,7 @@ class LogBox:
             self.txt.tag_config(t, foreground=fg)
 
     def append(self, msg, kind="info"):
-        _, icon = self._TAGS.get(kind, ("#333","·"))
+        _, icon = self._TAGS.get(kind, ("#333", "·"))
         self.txt.config(state="normal")
         self.txt.insert("end", f"{icon} {msg}\n", kind)
         self.txt.see("end")
@@ -83,7 +120,7 @@ class LogBox:
 
     def clear(self):
         self.txt.config(state="normal")
-        self.txt.delete("1.0","end")
+        self.txt.delete("1.0", "end")
         self.txt.config(state="disabled")
 
 
@@ -93,157 +130,258 @@ class LogBox:
 class DlgNewProject(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Nuovo progetto"); self.resizable(False,False)
+        self.title("Nuovo progetto"); self.resizable(False, False)
         self.configure(bg=C["bg"]); self.result = None
         f = tk.Frame(self, bg=C["bg"], padx=20, pady=16); f.pack()
         self.vn = tk.StringVar(); self.vd = tk.StringVar(); self.vr = tk.StringVar()
-        for i,(lbl,var) in enumerate([("Nome:",self.vn),("Descrizione:",self.vd),("DVC remote:",self.vr)]):
-            tk.Label(f,text=lbl,bg=C["bg"],font=("Helvetica",10)).grid(row=i,column=0,sticky="w",pady=3)
-            ttk.Entry(f,textvariable=var,width=30).grid(row=i,column=1,pady=3,padx=(8,0))
-        bf = tk.Frame(f,bg=C["bg"]); bf.grid(row=3,column=0,columnspan=2,pady=(10,0))
-        _btn(bf,"Crea",self._ok,color=C["primary"]).pack(side="left",padx=(0,8))
-        _btn(bf,"Annulla",self.destroy,color=C["gray"]).pack(side="left")
+        for i, (lbl, var) in enumerate([("Nome:", self.vn),
+                                         ("Descrizione:", self.vd),
+                                         ("DVC remote:", self.vr)]):
+            tk.Label(f, text=lbl, bg=C["bg"], font=("Helvetica", 10)).grid(
+                row=i, column=0, sticky="w", pady=3)
+            ttk.Entry(f, textvariable=var, width=30).grid(
+                row=i, column=1, pady=3, padx=(8, 0))
+        bf = tk.Frame(f, bg=C["bg"]); bf.grid(row=3, column=0, columnspan=2, pady=(10, 0))
+        _btn(bf, "Crea", self._ok, color=C["primary"]).pack(side="left", padx=(0, 8))
+        _btn(bf, "Annulla", self.destroy, color=C["gray"]).pack(side="left")
         self.grab_set(); self.wait_window()
 
     def _ok(self):
         n = self.vn.get().strip()
-        if not n: messagebox.showwarning("TestLab","Inserisci un nome.",parent=self); return
+        if not n: messagebox.showwarning("TestLab", "Inserisci un nome.", parent=self); return
         self.result = (n, self.vd.get().strip(), self.vr.get().strip()); self.destroy()
 
 
 class DlgNewTesttype(tk.Toplevel):
     def __init__(self, parent, projects):
         super().__init__(parent)
-        self.title("Nuovo testtype"); self.resizable(False,False)
+        self.title("Nuovo testtype"); self.resizable(False, False)
         self.configure(bg=C["bg"]); self.result = None
         f = tk.Frame(self, bg=C["bg"], padx=20, pady=16); f.pack()
-        f.columnconfigure(1,weight=1)
+        f.columnconfigure(1, weight=1)
         self.vp = tk.StringVar(); self.vn = tk.StringVar()
         self.va = tk.StringVar(); self.vc = tk.StringVar()
-        rows = [("Progetto:",self.vp,None),("Nome testtype:",self.vn,None),
-                ("Script analisi:",self.va,"py"),("Script confronto:",self.vc,"py")]
-        self._proj_cb = None
-        for i,(lbl,var,kind) in enumerate(rows):
-            tk.Label(f,text=lbl,bg=C["bg"],font=("Helvetica",10)).grid(row=i,column=0,sticky="w",pady=3)
-            if kind is None and i == 0:
-                cb = ttk.Combobox(f,textvariable=var,values=projects,state="readonly",width=26)
-                cb.grid(row=i,column=1,pady=3,padx=(8,0),sticky="w")
-                self._proj_cb = cb
-            elif kind is None:
-                ttk.Entry(f,textvariable=var,width=28).grid(row=i,column=1,pady=3,padx=(8,0),sticky="w")
-            else:
-                r = tk.Frame(f,bg=C["bg"]); r.grid(row=i,column=1,pady=3,padx=(8,0),sticky="w")
-                ttk.Entry(r,textvariable=var,width=24).pack(side="left",padx=(0,4))
-                _btn(r,"...",lambda v=var:self._browse(v),color=C["gray"],width=3).pack(side="left")
-        bf = tk.Frame(f,bg=C["bg"]); bf.grid(row=len(rows),column=0,columnspan=2,pady=(10,0))
-        _btn(bf,"Salva",self._ok,color=C["primary"]).pack(side="left",padx=(0,8))
-        _btn(bf,"Annulla",self.destroy,color=C["gray"]).pack(side="left")
+        tk.Label(f, text="Progetto:", bg=C["bg"], font=("Helvetica", 10)).grid(
+            row=0, column=0, sticky="w", pady=3)
+        ttk.Combobox(f, textvariable=self.vp, values=projects,
+                     state="readonly", width=26).grid(row=0, column=1, pady=3, padx=(8, 0), sticky="w")
+        tk.Label(f, text="Nome testtype:", bg=C["bg"], font=("Helvetica", 10)).grid(
+            row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(f, textvariable=self.vn, width=28).grid(
+            row=1, column=1, pady=3, padx=(8, 0), sticky="w")
+        for i, (lbl, var) in enumerate([("Script analisi:", self.va),
+                                         ("Script confronto:", self.vc)], start=2):
+            tk.Label(f, text=lbl, bg=C["bg"], font=("Helvetica", 10)).grid(
+                row=i, column=0, sticky="w", pady=3)
+            r = tk.Frame(f, bg=C["bg"]); r.grid(row=i, column=1, pady=3, padx=(8, 0), sticky="w")
+            ttk.Entry(r, textvariable=var, width=24).pack(side="left", padx=(0, 4))
+            _small_btn(r, "...", lambda v=var: self._browse(v)).pack(side="left")
+        bf = tk.Frame(f, bg=C["bg"]); bf.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        _btn(bf, "Salva", self._ok, color=C["primary"]).pack(side="left", padx=(0, 8))
+        _btn(bf, "Annulla", self.destroy, color=C["gray"]).pack(side="left")
         self.grab_set(); self.wait_window()
 
     def _browse(self, var):
-        p = filedialog.askopenfilename(filetypes=[("Script","*.py *.m"),("Tutti","*.*")])
+        p = filedialog.askopenfilename(filetypes=[("Script", "*.py *.m"), ("Tutti", "*.*")])
         if p: var.set(p)
 
     def _ok(self):
         if not self.vp.get() or not self.vn.get().strip():
-            messagebox.showwarning("TestLab","Seleziona progetto e inserisci nome.",parent=self); return
+            messagebox.showwarning("TestLab", "Seleziona progetto e nome.", parent=self); return
         self.result = (self.vp.get(), self.vn.get().strip(),
                        self.va.get().strip(), self.vc.get().strip()); self.destroy()
 
 
 class DlgImportRun(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Importa run"); self.resizable(False,False)
-        self.configure(bg=C["bg"])
-        f = tk.Frame(self,bg=C["bg"],padx=20,pady=16); f.pack()
-        f.columnconfigure(1,weight=1)
-        self.vp=tk.StringVar(); self.vt=tk.StringVar()
-        self.vc=tk.StringVar(); self.vf=tk.StringVar()
-        self.vdvc=tk.BooleanVar(value=False)
-        tk.Label(f,text="Progetto:",bg=C["bg"],font=("Helvetica",10)).grid(row=0,column=0,sticky="w",pady=3)
-        pcb=ttk.Combobox(f,textvariable=self.vp,values=[p["name"] for p in db.list_projects()],state="readonly",width=26)
-        pcb.grid(row=0,column=1,pady=3,padx=(8,0),sticky="w"); pcb.bind("<<ComboboxSelected>>",self._on_proj)
-        tk.Label(f,text="TestType:",bg=C["bg"],font=("Helvetica",10)).grid(row=1,column=0,sticky="w",pady=3)
-        self.tt_cb=ttk.Combobox(f,textvariable=self.vt,state="readonly",width=26)
-        self.tt_cb.grid(row=1,column=1,pady=3,padx=(8,0),sticky="w")
-        tk.Label(f,text="Condizione:",bg=C["bg"],font=("Helvetica",10)).grid(row=2,column=0,sticky="w",pady=3)
-        ttk.Entry(f,textvariable=self.vc,width=28).grid(row=2,column=1,pady=3,padx=(8,0),sticky="w")
-        tk.Label(f,text="File dati:",bg=C["bg"],font=("Helvetica",10)).grid(row=3,column=0,sticky="w",pady=3)
-        fr=tk.Frame(f,bg=C["bg"]); fr.grid(row=3,column=1,pady=3,padx=(8,0),sticky="w")
-        ttk.Entry(fr,textvariable=self.vf,width=24).pack(side="left",padx=(0,4))
-        _btn(fr,"...",self._browse,color=C["gray"],width=3).pack(side="left")
-        tk.Label(f,text="Note:",bg=C["bg"],font=("Helvetica",10)).grid(row=4,column=0,sticky="nw",pady=3)
-        self.txtn=tk.Text(f,height=3,width=28,font=("Helvetica",10),relief="flat",bd=1)
-        self.txtn.grid(row=4,column=1,pady=3,padx=(8,0),sticky="ew")
-        tk.Checkbutton(f,text="Traccia con DVC + git commit",variable=self.vdvc,
-                       bg=C["bg"],font=("Helvetica",10)).grid(row=5,column=1,sticky="w",pady=4)
-        bf=tk.Frame(f,bg=C["bg"]); bf.grid(row=6,column=0,columnspan=2,pady=(8,0))
-        _btn(bf,"Importa",self._ok,color=C["teal"]).pack(side="left",padx=(0,8))
-        _btn(bf,"Chiudi",self.destroy,color=C["gray"]).pack(side="left")
-        self.log=LogBox(f,height=4); self.log.frame.grid(row=7,column=0,columnspan=2,sticky="ew",pady=(8,0))
+    """Import run con campi condizione, nota e tag."""
 
-    def _on_proj(self,_=None):
-        self.tt_cb["values"]=[t["name"] for t in db.list_testtypes(self.vp.get())]
+    def __init__(self, parent, nav_ref=None):
+        super().__init__(parent)
+        self.title("Importa run")
+        self.geometry("520x680")
+        self.configure(bg=C["bg"])
+        self._nav = nav_ref   # per triggerare refresh dopo import
+        self._build()
+
+    def _build(self):
+        # scrollable frame
+        canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0)
+        sb = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        f = tk.Frame(canvas, bg=C["bg"], padx=20, pady=16)
+        win = canvas.create_window((0, 0), window=f, anchor="nw")
+        f.bind("<Configure>", lambda e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+
+        f.columnconfigure(1, weight=1)
+        row = 0
+
+        # ── Progetto / TestType ───────────────────────────────────────────────
+        def lbl(text, r):
+            tk.Label(f, text=text, bg=C["bg"], font=("Helvetica", 10)).grid(
+                row=r, column=0, sticky="w", pady=3)
+
+        self.vp = tk.StringVar(); self.vt = tk.StringVar()
+        lbl("Progetto:", row)
+        pcb = ttk.Combobox(f, textvariable=self.vp,
+                            values=[p["name"] for p in db.list_projects()],
+                            state="readonly", width=26)
+        pcb.grid(row=row, column=1, pady=3, padx=(8, 0), sticky="w")
+        pcb.bind("<<ComboboxSelected>>", self._on_proj); row += 1
+
+        lbl("TestType:", row)
+        self.tt_cb = ttk.Combobox(f, textvariable=self.vt, state="readonly", width=26)
+        self.tt_cb.grid(row=row, column=1, pady=3, padx=(8, 0), sticky="w"); row += 1
+
+        # ── Condizione principale ─────────────────────────────────────────────
+        self.vc = tk.StringVar()
+        lbl("Condizione:", row)
+        ttk.Entry(f, textvariable=self.vc, width=28).grid(
+            row=row, column=1, pady=3, padx=(8, 0), sticky="w"); row += 1
+
+        # ── File dati ─────────────────────────────────────────────────────────
+        self.vf = tk.StringVar()
+        lbl("File dati:", row)
+        fr = tk.Frame(f, bg=C["bg"]); fr.grid(row=row, column=1, pady=3, padx=(8, 0), sticky="w")
+        ttk.Entry(fr, textvariable=self.vf, width=24).pack(side="left", padx=(0, 4))
+        _small_btn(fr, "...", self._browse).pack(side="left"); row += 1
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=8); row += 1
+
+        # ── 10 campi condizione ───────────────────────────────────────────────
+        tk.Label(f, text="Campi condizione:", bg=C["bg"],
+                 font=("Helvetica", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 4)); row += 1
+
+        self.cond_vars = {}
+        for field in COND_FIELDS:
+            tk.Label(f, text=f"{field}:", bg=C["bg"],
+                     font=("Helvetica", 9), width=8, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=1)
+            v = tk.StringVar(); self.cond_vars[field] = v
+            ttk.Entry(f, textvariable=v, width=26).grid(
+                row=row, column=1, sticky="ew", pady=1, padx=(8, 0)); row += 1
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=8); row += 1
+
+        # ── Nota ─────────────────────────────────────────────────────────────
+        lbl("Nota:", row)
+        self.txtn = tk.Text(f, height=3, width=28, font=("Helvetica", 10),
+                             relief="flat", bd=1)
+        self.txtn.grid(row=row, column=1, pady=3, padx=(8, 0), sticky="ew"); row += 1
+
+        # ── Tag ──────────────────────────────────────────────────────────────
+        self.vtag = tk.StringVar()
+        lbl("Tag:", row)
+        ttk.Entry(f, textvariable=self.vtag, width=28).grid(
+            row=row, column=1, pady=3, padx=(8, 0), sticky="w")
+        tk.Label(f, text="(separati da virgola)", bg=C["bg"],
+                 fg=C["muted"], font=("Helvetica", 8)).grid(
+            row=row+1, column=1, sticky="w", padx=(8, 0)); row += 2
+
+        # ── DVC ──────────────────────────────────────────────────────────────
+        self.vdvc = tk.BooleanVar(value=False)
+        tk.Checkbutton(f, text="Traccia con DVC + git commit",
+                        variable=self.vdvc, bg=C["bg"],
+                        font=("Helvetica", 10)).grid(
+            row=row, column=1, sticky="w", pady=4); row += 1
+
+        # ── Bottoni ───────────────────────────────────────────────────────────
+        bf = tk.Frame(f, bg=C["bg"]); bf.grid(row=row, column=0, columnspan=2, pady=(8, 0)); row += 1
+        _btn(bf, "Importa", self._ok, color=C["teal"]).pack(side="left", padx=(0, 8))
+        _btn(bf, "Chiudi", self.destroy, color=C["gray"]).pack(side="left")
+
+        # ── Log ──────────────────────────────────────────────────────────────
+        self.log = LogBox(f, height=4)
+        self.log.frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+    def _on_proj(self, _=None):
+        self.tt_cb["values"] = [t["name"] for t in db.list_testtypes(self.vp.get())]
         self.vt.set("")
 
     def _browse(self):
-        p=filedialog.askopenfilename(filetypes=[("CSV/TXT","*.csv *.txt"),("Tutti","*.*")])
+        p = filedialog.askopenfilename(
+            filetypes=[("CSV/TXT", "*.csv *.txt"), ("Tutti", "*.*")])
         if p: self.vf.set(p)
 
     def _ok(self):
-        proj=self.vp.get(); tt=self.vt.get(); fp=Path(self.vf.get().strip())
-        if not proj or not tt: self.log.append("Seleziona progetto e testtype.","warning"); return
-        if not fp.exists(): self.log.append(f"File non trovato: {fp}","error"); return
-        notes=self.txtn.get("1.0","end").strip()
+        proj = self.vp.get(); tt = self.vt.get()
+        fp = Path(self.vf.get().strip())
+        if not proj or not tt:
+            self.log.append("Seleziona progetto e testtype.", "warning"); return
+        if not fp.exists():
+            self.log.append(f"File non trovato: {fp}", "error"); return
+
+        extra = {f: v.get().strip() for f, v in self.cond_vars.items() if v.get().strip()}
+        notes = self.txtn.get("1.0", "end").strip()
+        tags  = [t.strip() for t in self.vtag.get().split(",") if t.strip()]
+        cond  = self.vc.get().strip()
+
         def task():
             try:
                 if self.vdvc.get():
-                    res=fm.save_and_track(fp,proj,tt,self.vc.get().strip(),notes=notes)
-                    self.log.append(f"Run {res['run_db_id']} importato e tracciato.","success")
+                    res = fm.save_and_track(fp, proj, tt, cond,
+                                            notes=notes, tags=tags, extra=extra)
+                    self.log.append(f"Run {res['run_db_id']} importato e tracciato.", "success")
                 else:
-                    rid,_=fm.save_run(fp,proj,tt,self.vc.get().strip(),notes=notes)
-                    self.log.append(f"Run {rid} importato.","success")
-            except Exception as e: self.log.append(str(e),"error")
-        threading.Thread(target=task,daemon=True).start()
+                    rid, _ = fm.save_run(fp, proj, tt, cond,
+                                         notes=notes, tags=tags, extra=extra)
+                    self.log.append(f"Run {rid} importato.", "success")
+                # refresh pannello laterale se disponibile
+                if self._nav:
+                    self._nav.after(100, self._nav._on_tt)
+            except Exception as e:
+                self.log.append(str(e), "error")
+
+        threading.Thread(target=task, daemon=True).start()
 
 
 class DlgSettings(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Impostazioni"); self.resizable(False,False)
+        self.title("Impostazioni"); self.resizable(False, False)
         self.configure(bg=C["bg"])
-        f=tk.Frame(self,bg=C["bg"],padx=20,pady=16); f.pack(); f.columnconfigure(1,weight=1)
-        self.vars={}
-        fields=[("matlab.exe:","matlab_exe","file"),("Cartella export:","export_folder","dir"),
-                ("Formato default:","export_format","combo"),("DPI default:","export_dpi","entry")]
-        for i,(lbl,key,kind) in enumerate(fields):
-            tk.Label(f,text=lbl,bg=C["bg"],font=("Helvetica",10)).grid(row=i,column=0,sticky="w",pady=4)
-            v=tk.StringVar(value=SETTINGS.get(key,""))
-            self.vars[key]=v
-            if kind=="combo":
-                ttk.Combobox(f,textvariable=v,values=["PNG","PDF","SVG"],state="readonly",width=10).grid(
-                    row=i,column=1,pady=4,padx=(8,0),sticky="w")
-            elif kind=="entry":
-                ttk.Entry(f,textvariable=v,width=10).grid(row=i,column=1,pady=4,padx=(8,0),sticky="w")
+        f = tk.Frame(self, bg=C["bg"], padx=20, pady=16); f.pack()
+        f.columnconfigure(1, weight=1)
+        self.vars = {}
+        fields = [("matlab.exe:", "matlab_exe", "file"),
+                  ("Cartella export:", "export_folder", "dir"),
+                  ("Formato default:", "export_format", "combo"),
+                  ("DPI default:", "export_dpi", "entry")]
+        for i, (lbl, key, kind) in enumerate(fields):
+            tk.Label(f, text=lbl, bg=C["bg"], font=("Helvetica", 10)).grid(
+                row=i, column=0, sticky="w", pady=4)
+            v = tk.StringVar(value=SETTINGS.get(key, "")); self.vars[key] = v
+            if kind == "combo":
+                ttk.Combobox(f, textvariable=v, values=["PNG", "PDF", "SVG"],
+                             state="readonly", width=10).grid(
+                    row=i, column=1, pady=4, padx=(8, 0), sticky="w")
+            elif kind == "entry":
+                ttk.Entry(f, textvariable=v, width=10).grid(
+                    row=i, column=1, pady=4, padx=(8, 0), sticky="w")
             else:
-                r=tk.Frame(f,bg=C["bg"]); r.grid(row=i,column=1,pady=4,padx=(8,0),sticky="w")
-                ttk.Entry(r,textvariable=v,width=32).pack(side="left",padx=(0,4))
-                _btn(r,"...",lambda k=key:self._browse(k),color=C["gray"],width=3).pack(side="left")
-        bf=tk.Frame(f,bg=C["bg"]); bf.grid(row=len(fields),column=0,columnspan=2,pady=(12,0))
-        _btn(bf,"Salva",self._save,color=C["primary"]).pack(side="left",padx=(0,8))
-        _btn(bf,"Annulla",self.destroy,color=C["gray"]).pack(side="left")
+                r = tk.Frame(f, bg=C["bg"]); r.grid(row=i, column=1, pady=4, padx=(8, 0), sticky="w")
+                ttk.Entry(r, textvariable=v, width=32).pack(side="left", padx=(0, 4))
+                _small_btn(r, "...", lambda k=key: self._browse(k)).pack(side="left")
+        bf = tk.Frame(f, bg=C["bg"]); bf.grid(row=len(fields), column=0, columnspan=2, pady=(12, 0))
+        _btn(bf, "Salva", self._save, color=C["primary"]).pack(side="left", padx=(0, 8))
+        _btn(bf, "Annulla", self.destroy, color=C["gray"]).pack(side="left")
         self.grab_set(); self.wait_window()
 
-    def _browse(self,key):
-        p=(filedialog.askopenfilename(filetypes=[("Eseguibile","*.exe"),("Tutti","*.*")])
-           if key=="matlab_exe" else filedialog.askdirectory())
+    def _browse(self, key):
+        p = (filedialog.askopenfilename(filetypes=[("Eseguibile", "*.exe"), ("Tutti", "*.*")])
+             if key == "matlab_exe" else filedialog.askdirectory())
         if p: self.vars[key].set(p)
 
     def _save(self):
-        for k,v in self.vars.items(): SETTINGS[k]=v.get().strip()
+        for k, v in self.vars.items(): SETTINGS[k] = v.get().strip()
         save_settings(SETTINGS)
-        messagebox.showinfo("TestLab","Impostazioni salvate.",parent=self)
+        messagebox.showinfo("TestLab", "Impostazioni salvate.", parent=self)
         self.destroy()
 
 
@@ -251,90 +389,160 @@ class DlgGitDVC(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Git / DVC"); self.geometry("640x500"); self.configure(bg=C["bg"])
-        f=tk.Frame(self,bg=C["bg"],padx=16,pady=12); f.pack(fill="both",expand=True)
-        tk.Label(f,text="Git",bg=C["bg"],font=("Helvetica",11,"bold"),fg=C["primary"]).pack(anchor="w")
-        r1=tk.Frame(f,bg=C["bg"]); r1.pack(anchor="w",pady=(4,0))
-        for lbl,fn in [("status",lambda:self._run(fm.git_status,"git status")),
-                       ("add -A",lambda:self._run(fm.git_add_all,"git add")),
-                       ("log",lambda:self._run(fm.git_log,"git log")),
-                       ("pull",lambda:self._run(fm.git_pull,"git pull"))]:
-            _btn(r1,f"git {lbl}",fn,color=C["primary"],width=12).pack(side="left",padx=(0,6))
-        r2=tk.Frame(f,bg=C["bg"]); r2.pack(anchor="w",pady=6)
-        tk.Label(r2,text="Msg:",bg=C["bg"],font=("Helvetica",10)).pack(side="left",padx=(0,4))
-        self.vm=tk.StringVar()
-        ttk.Entry(r2,textvariable=self.vm,width=30).pack(side="left",padx=(0,6))
-        _btn(r2,"commit",self._commit,color=C["teal"],width=10).pack(side="left",padx=(0,6))
-        _btn(r2,"git+dvc push",self._push,color=C["teal"],width=14).pack(side="left")
-        ttk.Separator(f,orient="horizontal").pack(fill="x",pady=8)
-        tk.Label(f,text="DVC",bg=C["bg"],font=("Helvetica",11,"bold"),fg=C["amber"]).pack(anchor="w")
-        r3=tk.Frame(f,bg=C["bg"]); r3.pack(anchor="w",pady=(4,0))
-        for lbl,fn in [("status",lambda:self._run(fm.dvc_status,"dvc status")),
-                       ("pull",lambda:self._run(fm.dvc_pull,"dvc pull")),
-                       ("push",lambda:self._run(fm.dvc_push,"dvc push"))]:
-            _btn(r3,f"dvc {lbl}",fn,color=C["amber"],width=12).pack(side="left",padx=(0,6))
-        ttk.Separator(f,orient="horizontal").pack(fill="x",pady=8)
-        self.log=LogBox(f,height=12); self.log.frame.pack(fill="both",expand=True)
+        f = tk.Frame(self, bg=C["bg"], padx=16, pady=12); f.pack(fill="both", expand=True)
+        tk.Label(f, text="Git", bg=C["bg"], font=("Helvetica", 11, "bold"),
+                 fg=C["primary"]).pack(anchor="w")
+        r1 = tk.Frame(f, bg=C["bg"]); r1.pack(anchor="w", pady=(4, 0))
+        for lbl, fn in [("status", lambda: self._run(fm.git_status, "git status")),
+                         ("add -A", lambda: self._run(fm.git_add_all, "git add")),
+                         ("log",    lambda: self._run(fm.git_log, "git log")),
+                         ("pull",   lambda: self._run(fm.git_pull, "git pull"))]:
+            _btn(r1, f"git {lbl}", fn, color=C["primary"], width=12).pack(side="left", padx=(0, 6))
+        r2 = tk.Frame(f, bg=C["bg"]); r2.pack(anchor="w", pady=6)
+        tk.Label(r2, text="Msg:", bg=C["bg"], font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        self.vm = tk.StringVar()
+        ttk.Entry(r2, textvariable=self.vm, width=30).pack(side="left", padx=(0, 6))
+        _btn(r2, "commit", self._commit, color=C["teal"], width=10).pack(side="left", padx=(0, 6))
+        _btn(r2, "git+dvc push", self._push, color=C["teal"], width=14).pack(side="left")
+        ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
+        tk.Label(f, text="DVC", bg=C["bg"], font=("Helvetica", 11, "bold"),
+                 fg=C["amber"]).pack(anchor="w")
+        r3 = tk.Frame(f, bg=C["bg"]); r3.pack(anchor="w", pady=(4, 0))
+        for lbl, fn in [("status", lambda: self._run(fm.dvc_status, "dvc status")),
+                         ("pull",   lambda: self._run(fm.dvc_pull, "dvc pull")),
+                         ("push",   lambda: self._run(fm.dvc_push, "dvc push"))]:
+            _btn(r3, f"dvc {lbl}", fn, color=C["amber"], width=12).pack(side="left", padx=(0, 6))
+        ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
+        self.log = LogBox(f, height=12); self.log.frame.pack(fill="both", expand=True)
 
-    def _run(self,fn,label):
+    def _run(self, fn, label):
         def t():
-            r=fn(); k="success" if r["ok"] else "error"
-            self.log.append(f"[{label}] {r['output'] or r['error']}",k)
-        threading.Thread(target=t,daemon=True).start()
+            r = fn(); k = "success" if r["ok"] else "error"
+            self.log.append(f"[{label}] {r['output'] or r['error']}", k)
+        threading.Thread(target=t, daemon=True).start()
 
     def _commit(self):
-        msg=self.vm.get().strip()
-        if not msg: self.log.append("Inserisci un messaggio.","warning"); return
-        self._run(lambda:fm.git_commit(msg),"git commit")
+        msg = self.vm.get().strip()
+        if not msg: self.log.append("Inserisci un messaggio.", "warning"); return
+        self._run(lambda: fm.git_commit(msg), "git commit")
 
     def _push(self):
-        self._run(fm.git_push,"git push"); self._run(fm.dvc_push,"dvc push")
+        self._run(fm.git_push, "git push"); self._run(fm.dvc_push, "dvc push")
 
 
 class DlgExploreRuns(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Esplora run"); self.geometry("900x520"); self.configure(bg=C["bg"])
-        f=tk.Frame(self,bg=C["bg"],padx=12,pady=10); f.pack(fill="both",expand=True)
-        # filtri
-        ff=tk.Frame(f,bg=C["bg"]); ff.pack(fill="x",pady=(0,6))
-        tk.Label(ff,text="Progetto:",bg=C["bg"],font=("Helvetica",10)).pack(side="left",padx=(0,4))
-        self.vp=tk.StringVar()
-        ttk.Combobox(ff,textvariable=self.vp,values=[p["name"] for p in db.list_projects()],
-                     state="readonly",width=18).pack(side="left",padx=(0,12))
-        tk.Label(ff,text="Condizione:",bg=C["bg"],font=("Helvetica",10)).pack(side="left",padx=(0,4))
-        self.vc=tk.StringVar()
-        ttk.Entry(ff,textvariable=self.vc,width=14).pack(side="left",padx=(0,12))
-        tk.Label(ff,text="Campo:",bg=C["bg"],font=("Helvetica",10)).pack(side="left",padx=(0,4))
-        self.vf=tk.StringVar()
-        ttk.Combobox(ff,textvariable=self.vf,values=COND_FIELDS,width=10).pack(side="left",padx=(0,4))
-        tk.Label(ff,text="=",bg=C["bg"],font=("Helvetica",10)).pack(side="left")
-        self.vfv=tk.StringVar()
-        ttk.Entry(ff,textvariable=self.vfv,width=10).pack(side="left",padx=(0,10))
-        _btn(ff,"Cerca",self._search,color=C["primary"],width=8).pack(side="left")
-        # treeview
-        cols=("id","progetto","testtype","run_id","condizione","data","note")
-        self.tree=ttk.Treeview(f,columns=cols,show="headings",height=18)
-        ws={"id":35,"progetto":100,"testtype":100,"run_id":55,"condizione":120,"data":85,"note":280}
+        self.title("Esplora run"); self.geometry("940x540"); self.configure(bg=C["bg"])
+        f = tk.Frame(self, bg=C["bg"], padx=12, pady=10); f.pack(fill="both", expand=True)
+        ff = tk.Frame(f, bg=C["bg"]); ff.pack(fill="x", pady=(0, 6))
+        tk.Label(ff, text="Progetto:", bg=C["bg"], font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        self.vp = tk.StringVar()
+        ttk.Combobox(ff, textvariable=self.vp,
+                     values=[p["name"] for p in db.list_projects()],
+                     state="readonly", width=18).pack(side="left", padx=(0, 12))
+        tk.Label(ff, text="Condizione:", bg=C["bg"], font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        self.vc = tk.StringVar()
+        ttk.Entry(ff, textvariable=self.vc, width=14).pack(side="left", padx=(0, 12))
+        tk.Label(ff, text="Campo:", bg=C["bg"], font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        self.vf = tk.StringVar()
+        ttk.Combobox(ff, textvariable=self.vf, values=COND_FIELDS, width=10).pack(side="left", padx=(0, 4))
+        tk.Label(ff, text="=", bg=C["bg"], font=("Helvetica", 10)).pack(side="left")
+        self.vfv = tk.StringVar()
+        ttk.Entry(ff, textvariable=self.vfv, width=10).pack(side="left", padx=(0, 10))
+        tk.Label(ff, text="Tag:", bg=C["bg"], font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        self.vtag = tk.StringVar()
+        ttk.Entry(ff, textvariable=self.vtag, width=10).pack(side="left", padx=(0, 10))
+        _btn(ff, "Cerca", self._search, color=C["primary"], width=8).pack(side="left")
+        cols = ("id", "testtype", "run_id", "condizione", "data", "tag", "note")
+        self.tree = ttk.Treeview(f, columns=cols, show="headings", height=18)
+        ws = {"id": 35, "testtype": 100, "run_id": 55, "condizione": 120,
+              "data": 85, "tag": 100, "note": 260}
         for c in cols:
-            self.tree.heading(c,text=c.capitalize()); self.tree.column(c,width=ws.get(c,90))
-        self.tree.pack(side="left",fill="both",expand=True)
-        ttk.Scrollbar(f,orient="vertical",command=self.tree.yview).pack(side="left",fill="y")
-        self.lbl=tk.Label(f,text="",bg=C["bg"],fg=C["muted"],font=("Helvetica",10))
+            self.tree.heading(c, text=c.capitalize()); self.tree.column(c, width=ws.get(c, 90))
+        self.tree.pack(side="left", fill="both", expand=True)
+        ttk.Scrollbar(f, orient="vertical", command=self.tree.yview).pack(side="left", fill="y")
+        self.lbl = tk.Label(f, text="", bg=C["bg"], fg=C["muted"], font=("Helvetica", 10))
         self.lbl.pack(anchor="w")
 
     def _search(self):
-        proj=self.vp.get()
-        if not proj: messagebox.showwarning("TestLab","Seleziona un progetto.",parent=self); return
-        runs=db.list_runs(proj,condition=self.vc.get().strip() or None)
-        field=self.vf.get().strip(); fval=self.vfv.get().strip()
+        proj = self.vp.get()
+        if not proj:
+            messagebox.showwarning("TestLab", "Seleziona un progetto.", parent=self); return
+        tags = [t.strip() for t in self.vtag.get().split(",") if t.strip()]
+        runs = db.list_runs(proj, condition=self.vc.get().strip() or None,
+                            tags=tags or None)
+        field = self.vf.get().strip(); fval = self.vfv.get().strip()
         if field and fval:
-            runs=[r for r in runs if r.get("extra",{}).get(field,"").lower()==fval.lower()]
+            runs = [r for r in runs
+                    if r.get("extra", {}).get(field, "").lower() == fval.lower()]
         self.tree.delete(*self.tree.get_children())
         for r in runs:
-            note=r["notes"][:55]+"…" if len(r["notes"])>55 else r["notes"]
-            self.tree.insert("","end",values=(r["id"],r["project"],r["testtype"],
-                                              r["run_id"],r["condition"],r["date"][:10],note))
+            note = r["notes"][:50] + "…" if len(r["notes"]) > 50 else r["notes"]
+            self.tree.insert("", "end", values=(
+                r["id"], r["testtype"], r["run_id"], r["condition"],
+                r["date"][:10], ", ".join(r["tags"]), note))
         self.lbl.config(text=f"{len(runs)} run trovati")
+
+
+class DlgRegisterScript(tk.Toplevel):
+    """Registra / modifica gli script per un progetto/testtype."""
+
+    def __init__(self, parent, project: str, testtype: str, on_done=None):
+        super().__init__(parent)
+        self.title(f"Script — {project} / {testtype}")
+        self.resizable(False, False); self.configure(bg=C["bg"])
+        self._project = project; self._testtype = testtype; self._on_done = on_done
+        self.result = None
+        self._build()
+        self.grab_set(); self.wait_window()
+
+    def _build(self):
+        current = get_scripts(self._project, self._testtype)
+        f = tk.Frame(self, bg=C["bg"], padx=20, pady=16); f.pack()
+        f.columnconfigure(1, weight=1)
+
+        tk.Label(f, text=f"Progetto: {self._project}", bg=C["bg"],
+                 font=("Helvetica", 10, "bold"), fg=C["primary"]).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        self.va = tk.StringVar(value=current.get("analysis", ""))
+        self.vc = tk.StringVar(value=current.get("compare", ""))
+
+        for i, (lbl, var) in enumerate([("Script analisi:", self.va),
+                                         ("Script confronto:", self.vc)], start=1):
+            tk.Label(f, text=lbl, bg=C["bg"], font=("Helvetica", 10)).grid(
+                row=i, column=0, sticky="w", pady=4)
+            ttk.Entry(f, textvariable=var, width=34).grid(
+                row=i, column=1, pady=4, padx=(8, 4), sticky="ew")
+            _small_btn(f, "...", lambda v=var: self._browse(v)).grid(
+                row=i, column=2, pady=4)
+
+        # mostra path correnti
+        if current.get("analysis"):
+            tk.Label(f, text=f"  {Path(current['analysis']).name}",
+                     bg=C["bg"], fg=C["teal"], font=("Helvetica", 8)).grid(
+                row=1, column=0, columnspan=3, sticky="w")
+        if current.get("compare"):
+            tk.Label(f, text=f"  {Path(current['compare']).name}",
+                     bg=C["bg"], fg=C["primary"], font=("Helvetica", 8)).grid(
+                row=2, column=0, columnspan=3, sticky="w")
+
+        bf = tk.Frame(f, bg=C["bg"]); bf.grid(row=4, column=0, columnspan=3, pady=(12, 0))
+        _btn(bf, "Salva", self._save, color=C["primary"]).pack(side="left", padx=(0, 8))
+        _btn(bf, "Annulla", self.destroy, color=C["gray"]).pack(side="left")
+
+    def _browse(self, var):
+        p = filedialog.askopenfilename(filetypes=[("Script", "*.py *.m"), ("Tutti", "*.*")])
+        if p: var.set(p)
+
+    def _save(self):
+        a = self.va.get().strip(); c = self.vc.get().strip()
+        set_scripts(self._project, self._testtype, a, c)
+        self.result = (a, c)
+        if self._on_done: self._on_done(a, c)
+        messagebox.showinfo("TestLab", "Script registrati.", parent=self)
+        self.destroy()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -342,7 +550,7 @@ class DlgExploreRuns(tk.Toplevel):
 # ══════════════════════════════════════════════════════════════════════════════
 class NavPanel(tk.Frame):
     def __init__(self, parent, on_change):
-        super().__init__(parent, bg=C["bg2"], width=290)
+        super().__init__(parent, bg=C["bg2"], width=300)
         self.pack_propagate(False)
         self.on_change = on_change
         self._run_map = {}
@@ -350,128 +558,233 @@ class NavPanel(tk.Frame):
         self._build()
 
     def _build(self):
-        tk.Label(self,text="Navigazione",bg=C["bg2"],fg=C["primary"],
-                 font=("Helvetica",11,"bold")).pack(anchor="w",padx=10,pady=(10,4))
+        # ── Header con refresh ────────────────────────────────────────────────
+        hf = tk.Frame(self, bg=C["bg2"]); hf.pack(fill="x", padx=10, pady=(10, 4))
+        tk.Label(hf, text="Navigazione", bg=C["bg2"], fg=C["primary"],
+                 font=("Helvetica", 11, "bold")).pack(side="left")
+        _small_btn(hf, "↺ Refresh", self.full_refresh,
+                   color=C["teal"]).pack(side="right")
 
-        # progetto
-        pf=tk.Frame(self,bg=C["bg2"]); pf.pack(fill="x",padx=10,pady=2)
-        tk.Label(pf,text="Progetto:",bg=C["bg2"],font=("Helvetica",10)).pack(side="left")
-        self.vp=tk.StringVar()
-        self.pcb=ttk.Combobox(pf,textvariable=self.vp,state="readonly",width=17)
-        self.pcb.pack(side="left",padx=(6,0))
-        self.pcb.bind("<<ComboboxSelected>>",self._on_proj)
+        # ── Progetto ──────────────────────────────────────────────────────────
+        pf = tk.Frame(self, bg=C["bg2"]); pf.pack(fill="x", padx=10, pady=2)
+        tk.Label(pf, text="Progetto:", bg=C["bg2"], font=("Helvetica", 10)).pack(side="left")
+        self.vp = tk.StringVar()
+        self.pcb = ttk.Combobox(pf, textvariable=self.vp, state="readonly", width=17)
+        self.pcb.pack(side="left", padx=(6, 0))
+        self.pcb.bind("<<ComboboxSelected>>", self._on_proj)
 
-        # testtype
-        tf=tk.Frame(self,bg=C["bg2"]); tf.pack(fill="x",padx=10,pady=2)
-        tk.Label(tf,text="TestType:",bg=C["bg2"],font=("Helvetica",10)).pack(side="left")
-        self.vt=tk.StringVar()
-        self.tcb=ttk.Combobox(tf,textvariable=self.vt,state="readonly",width=17)
-        self.tcb.pack(side="left",padx=(6,0))
-        self.tcb.bind("<<ComboboxSelected>>",self._on_tt)
+        # ── TestType ──────────────────────────────────────────────────────────
+        tf = tk.Frame(self, bg=C["bg2"]); tf.pack(fill="x", padx=10, pady=2)
+        tk.Label(tf, text="TestType:", bg=C["bg2"], font=("Helvetica", 10)).pack(side="left")
+        self.vt = tk.StringVar()
+        self.tcb = ttk.Combobox(tf, textvariable=self.vt, state="readonly", width=17)
+        self.tcb.pack(side="left", padx=(6, 0))
+        self.tcb.bind("<<ComboboxSelected>>", self._on_tt)
 
-        ttk.Separator(self,orient="horizontal").pack(fill="x",padx=10,pady=6)
+        # ── Script registrati (mostra solo i nomi) ────────────────────────────
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=10, pady=5)
+        sf = tk.Frame(self, bg=C["bg2"]); sf.pack(fill="x", padx=10, pady=2)
+        tk.Label(sf, text="Script:", bg=C["bg2"], fg=C["muted"],
+                 font=("Helvetica", 9, "bold")).pack(side="left")
+        _small_btn(sf, "Modifica", self._edit_scripts,
+                   color=C["primary"]).pack(side="right")
 
-        # run list
-        tk.Label(self,text="Run  (Ctrl+click per multipli)",bg=C["bg2"],
-                 fg=C["muted"],font=("Helvetica",9)).pack(anchor="w",padx=10)
-        lbf=tk.Frame(self,bg=C["bg2"]); lbf.pack(fill="x",padx=10,pady=4)
-        self.lb=tk.Listbox(lbf,selectmode="multiple",height=8,font=("Courier",9),
-                            bg=C["white"],relief="flat",bd=1,exportselection=False)
-        self.lb.pack(side="left",fill="both",expand=True)
-        sb=ttk.Scrollbar(lbf,orient="vertical",command=self.lb.yview)
-        sb.pack(side="right",fill="y"); self.lb.config(yscrollcommand=sb.set)
-        self.lb.bind("<<ListboxSelect>>",self._on_sel)
+        self.lbl_analysis = tk.Label(self, text="  Analisi: —", bg=C["bg2"],
+                                      fg=C["teal"], font=("Helvetica", 9),
+                                      anchor="w", cursor="hand2")
+        self.lbl_analysis.pack(fill="x", padx=10)
+        self.lbl_analysis.bind("<Button-1>", lambda e: self._use_script("analysis"))
 
-        ttk.Separator(self,orient="horizontal").pack(fill="x",padx=10,pady=6)
+        self.lbl_compare = tk.Label(self, text="  Confronto: —", bg=C["bg2"],
+                                     fg=C["primary"], font=("Helvetica", 9),
+                                     anchor="w", cursor="hand2")
+        self.lbl_compare.pack(fill="x", padx=10)
+        self.lbl_compare.bind("<Button-1>", lambda e: self._use_script("compare"))
 
-        # campi condizione
-        tk.Label(self,text="Campi condizione run",bg=C["bg2"],fg=C["primary"],
-                 font=("Helvetica",10,"bold")).pack(anchor="w",padx=10)
-        cf=tk.Frame(self,bg=C["bg2"]); cf.pack(fill="x",padx=10,pady=4)
-        cf.columnconfigure(1,weight=1)
-        self.cvars={}
-        for i,field in enumerate(COND_FIELDS):
-            tk.Label(cf,text=f"{field}:",bg=C["bg2"],font=("Helvetica",9),
-                     width=8,anchor="w").grid(row=i,column=0,sticky="w",pady=1)
-            v=tk.StringVar(); self.cvars[field]=v
-            ttk.Entry(cf,textvariable=v,width=16,font=("Helvetica",9)).grid(
-                row=i,column=1,sticky="ew",pady=1,padx=(4,0))
+        tk.Label(self, text="  (click per caricare nel launcher)",
+                 bg=C["bg2"], fg=C["muted"], font=("Helvetica", 8)).pack(
+            anchor="w", padx=10, pady=(0, 2))
 
-        # nota
-        tk.Label(self,text="Nota:",bg=C["bg2"],font=("Helvetica",9,"bold")).pack(
-            anchor="w",padx=10,pady=(6,0))
-        self.txtn=tk.Text(self,height=3,font=("Helvetica",9),
-                           relief="flat",bd=1,bg=C["white"])
-        self.txtn.pack(fill="x",padx=10,pady=(2,4))
+        # ── Run list ──────────────────────────────────────────────────────────
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=10, pady=5)
+        rh = tk.Frame(self, bg=C["bg2"]); rh.pack(fill="x", padx=10)
+        tk.Label(rh, text="Run", bg=C["bg2"], fg=C["muted"],
+                 font=("Helvetica", 9, "bold")).pack(side="left")
+        tk.Label(rh, text="(Ctrl+click per multipli)", bg=C["bg2"],
+                 fg=C["muted"], font=("Helvetica", 8)).pack(side="left", padx=(4, 0))
 
-        _btn(self,"Salva campi run",self._save,color=C["teal"],width=18).pack(
-            padx=10,pady=(0,10))
+        lbf = tk.Frame(self, bg=C["bg2"]); lbf.pack(fill="x", padx=10, pady=4)
+        self.lb = tk.Listbox(lbf, selectmode="multiple", height=9,
+                              font=("Courier", 9), bg=C["white"],
+                              relief="flat", bd=1, exportselection=False)
+        self.lb.pack(side="left", fill="both", expand=True)
+        sb2 = ttk.Scrollbar(lbf, orient="vertical", command=self.lb.yview)
+        sb2.pack(side="right", fill="y"); self.lb.config(yscrollcommand=sb2.set)
+        self.lb.bind("<<ListboxSelect>>", self._on_sel)
 
-        self.refresh()
+        # ── Campi condizione + nota ────────────────────────────────────────────
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=10, pady=5)
+        tk.Label(self, text="Campi condizione run", bg=C["bg2"], fg=C["primary"],
+                 font=("Helvetica", 9, "bold")).pack(anchor="w", padx=10)
 
-    def refresh(self):
-        names=[p["name"] for p in db.list_projects()]
-        self.pcb["values"]=names
+        cf = tk.Frame(self, bg=C["bg2"]); cf.pack(fill="x", padx=10, pady=3)
+        cf.columnconfigure(1, weight=1)
+        self.cvars = {}
+        for i, field in enumerate(COND_FIELDS):
+            tk.Label(cf, text=f"{field}:", bg=C["bg2"], font=("Helvetica", 8),
+                     width=7, anchor="w").grid(row=i, column=0, sticky="w", pady=1)
+            v = tk.StringVar(); self.cvars[field] = v
+            ttk.Entry(cf, textvariable=v, width=17,
+                      font=("Helvetica", 9)).grid(row=i, column=1, sticky="ew", pady=1, padx=(3, 0))
+
+        tk.Label(self, text="Nota:", bg=C["bg2"], font=("Helvetica", 9, "bold")).pack(
+            anchor="w", padx=10, pady=(5, 0))
+        self.txtn = tk.Text(self, height=2, font=("Helvetica", 9),
+                             relief="flat", bd=1, bg=C["white"])
+        self.txtn.pack(fill="x", padx=10, pady=(2, 4))
+
+        # Tag visualizzazione
+        self.lbl_tags = tk.Label(self, text="Tag: —", bg=C["bg2"],
+                                  fg=C["muted"], font=("Helvetica", 8))
+        self.lbl_tags.pack(anchor="w", padx=10)
+
+        _btn(self, "Salva campi run", self._save_fields,
+             color=C["teal"], width=18).pack(padx=10, pady=(4, 10))
+
+        self.refresh_projects()
+
+    # ── Refresh ───────────────────────────────────────────────────────────────
+
+    def refresh_projects(self):
+        names = [p["name"] for p in db.list_projects()]
+        self.pcb["values"] = names
         if names and not self.vp.get():
             self.vp.set(names[0]); self._on_proj()
 
-    def _on_proj(self,_=None):
-        tts=[t["name"] for t in db.list_testtypes(self.vp.get())]
-        self.tcb["values"]=tts; self.vt.set(tts[0] if tts else ""); self._on_tt()
+    def full_refresh(self):
+        """Aggiorna progetti, testtype e lista run mantenendo la selezione corrente."""
+        cur_proj = self.vp.get()
+        cur_tt   = self.vt.get()
+        names = [p["name"] for p in db.list_projects()]
+        self.pcb["values"] = names
+        if cur_proj in names:
+            self.vp.set(cur_proj)
+            tts = [t["name"] for t in db.list_testtypes(cur_proj)]
+            self.tcb["values"] = tts
+            if cur_tt in tts:
+                self.vt.set(cur_tt)
+                self._on_tt()
+            elif tts:
+                self.vt.set(tts[0]); self._on_tt()
+        elif names:
+            self.vp.set(names[0]); self._on_proj()
+        self._update_script_labels()
 
-    def _on_tt(self,_=None):
-        runs=db.list_runs(self.vp.get(),self.vt.get()) if self.vp.get() and self.vt.get() else []
-        self._run_map={}; self.lb.delete(0,"end")
+    def _on_proj(self, _=None):
+        tts = [t["name"] for t in db.list_testtypes(self.vp.get())]
+        self.tcb["values"] = tts
+        self.vt.set(tts[0] if tts else "")
+        self._on_tt()
+        self._update_script_labels()
+
+    def _on_tt(self, _=None):
+        runs = db.list_runs(self.vp.get(), self.vt.get()) \
+               if self.vp.get() and self.vt.get() else []
+        self._run_map = {}; self.lb.delete(0, "end")
         for r in runs:
-            lbl=f"{r['run_id']}  {r['condition']}"; self._run_map[lbl]=r["id"]
-            self.lb.insert("end",lbl)
-        self._clear_fields(); self.on_change([],self.vp.get(),self.vt.get())
+            label = f"{r['run_id']}  {r['condition']}"
+            self._run_map[label] = r["id"]
+            self.lb.insert("end", label)
+        self._clear_fields()
+        self.on_change([], self.vp.get(), self.vt.get())
+        self._update_script_labels()
 
-    def _on_sel(self,_=None):
-        ids=[self._run_map[self.lb.get(i)] for i in self.lb.curselection()]
-        if len(ids)==1: self._load_fields(ids[0])
-        else: self._clear_fields()
-        self.on_change(ids,self.vp.get(),self.vt.get())
+    def _on_sel(self, _=None):
+        ids = [self._run_map[self.lb.get(i)] for i in self.lb.curselection()]
+        if len(ids) == 1:
+            self._load_fields(ids[0])
+        else:
+            self._clear_fields()
+        self.on_change(ids, self.vp.get(), self.vt.get())
 
-    def _load_fields(self,rid):
-        run=db.get_run(rid)
+    # ── Script labels ─────────────────────────────────────────────────────────
+
+    def _update_script_labels(self):
+        sc = get_scripts(self.vp.get(), self.vt.get())
+        a = sc.get("analysis", "")
+        c = sc.get("compare", "")
+        self.lbl_analysis.config(
+            text=f"  Analisi: {Path(a).name if a else '—'}",
+            fg=C["teal"] if a else C["muted"])
+        self.lbl_compare.config(
+            text=f"  Confronto: {Path(c).name if c else '—'}",
+            fg=C["primary"] if c else C["muted"])
+
+    def _edit_scripts(self):
+        proj = self.vp.get(); tt = self.vt.get()
+        if not proj or not tt:
+            messagebox.showwarning("TestLab", "Seleziona progetto e testtype."); return
+        DlgRegisterScript(self, proj, tt, on_done=lambda a, c: self._update_script_labels())
+
+    def _use_script(self, kind: str):
+        """Carica lo script nel launcher panel (chiamato dal MainWindow)."""
+        sc = get_scripts(self.vp.get(), self.vt.get())
+        path = sc.get(kind, "")
+        if path and self._launcher_ref:
+            if kind == "analysis":
+                self._launcher_ref.va.set(path)
+            else:
+                self._launcher_ref.vc.set(path)
+
+    # ── Fields ────────────────────────────────────────────────────────────────
+
+    def _load_fields(self, rid):
+        run = db.get_run(rid)
         if not run: return
-        self._cur_id=rid; extra=run.get("extra",{})
-        for f,v in self.cvars.items(): v.set(extra.get(f,""))
-        self.txtn.delete("1.0","end"); self.txtn.insert("1.0",run.get("notes",""))
+        self._cur_id = rid; extra = run.get("extra", {})
+        for field, var in self.cvars.items(): var.set(extra.get(field, ""))
+        self.txtn.delete("1.0", "end"); self.txtn.insert("1.0", run.get("notes", ""))
+        tags = run.get("tags", [])
+        self.lbl_tags.config(text=f"Tag: {', '.join(tags) if tags else '—'}")
 
     def _clear_fields(self):
-        self._cur_id=None
+        self._cur_id = None
         for v in self.cvars.values(): v.set("")
-        self.txtn.delete("1.0","end")
+        self.txtn.delete("1.0", "end")
+        self.lbl_tags.config(text="Tag: —")
 
-    def _save(self):
+    def _save_fields(self):
         if self._cur_id is None:
-            messagebox.showwarning("TestLab","Seleziona un singolo run."); return
-        extra={f:v.get().strip() for f,v in self.cvars.items() if v.get().strip()}
-        notes=self.txtn.get("1.0","end").strip()
+            messagebox.showwarning("TestLab", "Seleziona un singolo run."); return
+        extra = {f: v.get().strip() for f, v in self.cvars.items() if v.get().strip()}
+        notes = self.txtn.get("1.0", "end").strip()
         try:
             with db._conn() as con:
-                con.execute("UPDATE runs SET notes=? WHERE id=?",(notes,self._cur_id))
-                con.execute("DELETE FROM run_extra WHERE run_id=?",(self._cur_id,))
-                for k,v in extra.items():
+                con.execute("UPDATE runs SET notes=? WHERE id=?", (notes, self._cur_id))
+                con.execute("DELETE FROM run_extra WHERE run_id=?", (self._cur_id,))
+                for k, v in extra.items():
                     con.execute("INSERT INTO run_extra (run_id,key,value) VALUES (?,?,?)",
-                                (self._cur_id,k,v))
-            messagebox.showinfo("TestLab","Campi salvati.")
-        except Exception as e: messagebox.showerror("TestLab",str(e))
+                                (self._cur_id, k, v))
+            messagebox.showinfo("TestLab", "Campi salvati.")
+        except Exception as e: messagebox.showerror("TestLab", str(e))
+
+    # ── Getters ───────────────────────────────────────────────────────────────
 
     def selected_ids(self):
         return [self._run_map[self.lb.get(i)] for i in self.lb.curselection()]
 
     def selected_files(self):
-        files=[]
+        files = []
         for rid in self.selected_ids():
-            r=db.get_run(rid)
-            if r: files.append(DATA_ROOT/r["data_path"])
+            r = db.get_run(rid)
+            if r: files.append(DATA_ROOT / r["data_path"])
         return files
 
     def cur_project(self): return self.vp.get()
     def cur_testtype(self): return self.vt.get()
+
+    # il launcher imposta questo per il click su script label
+    _launcher_ref = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,186 +794,195 @@ class LauncherPanel(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=C["bg"])
         self.nav = None
-        self._last_fig: Path|None = None
+        self._last_fig: Path | None = None
         self._build()
 
     def _build(self):
-        self.columnconfigure(0,weight=1); self.columnconfigure(1,weight=1)
+        self.columnconfigure(0, weight=1); self.columnconfigure(1, weight=1)
 
         # ── Analisi ───────────────────────────────────────────────────────────
-        af=tk.LabelFrame(self,text="  Analisi  ",bg=C["bg"],fg=C["teal"],
-                          font=("Helvetica",10,"bold"),relief="groove",bd=1)
-        af.grid(row=0,column=0,sticky="nsew",padx=(0,6),pady=(0,8))
-        af.columnconfigure(0,weight=1)
+        af = tk.LabelFrame(self, text="  Analisi  ", bg=C["bg"], fg=C["teal"],
+                            font=("Helvetica", 10, "bold"), relief="groove", bd=1)
+        af.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
+        af.columnconfigure(0, weight=1)
 
-        tk.Label(af,text="Script (.py / .m):",bg=C["bg"],
-                 font=("Helvetica",10)).grid(row=0,column=0,sticky="w",padx=8,pady=(8,2))
-        sf=tk.Frame(af,bg=C["bg"]); sf.grid(row=1,column=0,sticky="ew",padx=8,pady=2)
-        sf.columnconfigure(0,weight=1)
-        self.va=tk.StringVar()
-        ttk.Entry(sf,textvariable=self.va).grid(row=0,column=0,sticky="ew",padx=(0,4))
-        _btn(sf,"...",lambda:self._browse(self.va),color=C["gray"],width=3).grid(row=0,column=1)
-        self.la_type=tk.Label(af,text="",bg=C["bg"],font=("Helvetica",9,"italic"),fg=C["muted"])
-        self.la_type.grid(row=2,column=0,sticky="w",padx=8)
-        self.va.trace_add("write",lambda *_:self._update_type(self.va,self.la_type))
-
-        tk.Label(af,text="Usa run selezionati dal pannello sinistro",
-                 bg=C["bg"],fg=C["muted"],font=("Helvetica",9)).grid(
-            row=3,column=0,sticky="w",padx=8,pady=(6,2))
-        _btn(af,"▶  Lancia analisi",self._launch_analysis,
-             color=C["teal"],width=20).grid(row=4,column=0,sticky="w",padx=8,pady=8)
+        tk.Label(af, text="Script (.py / .m):", bg=C["bg"],
+                 font=("Helvetica", 10)).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        sf = tk.Frame(af, bg=C["bg"]); sf.grid(row=1, column=0, sticky="ew", padx=8, pady=2)
+        sf.columnconfigure(0, weight=1)
+        self.va = tk.StringVar()
+        ttk.Entry(sf, textvariable=self.va).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        _small_btn(sf, "...", lambda: self._browse(self.va)).grid(row=0, column=1)
+        self.la_type = tk.Label(af, text="", bg=C["bg"], font=("Helvetica", 9, "italic"),
+                                 fg=C["muted"])
+        self.la_type.grid(row=2, column=0, sticky="w", padx=8)
+        self.va.trace_add("write", lambda *_: self._update_type(self.va, self.la_type))
+        tk.Label(af, text="Usa run selezionati dal pannello sinistro",
+                 bg=C["bg"], fg=C["muted"], font=("Helvetica", 9)).grid(
+            row=3, column=0, sticky="w", padx=8, pady=(6, 2))
+        _btn(af, "▶  Lancia analisi", self._launch_analysis,
+             color=C["teal"], width=20).grid(row=4, column=0, sticky="w", padx=8, pady=8)
 
         # ── Confronto ─────────────────────────────────────────────────────────
-        cf=tk.LabelFrame(self,text="  Confronto  ",bg=C["bg"],fg=C["primary"],
-                          font=("Helvetica",10,"bold"),relief="groove",bd=1)
-        cf.grid(row=0,column=1,sticky="nsew",padx=(6,0),pady=(0,8))
-        cf.columnconfigure(0,weight=1)
+        cf = tk.LabelFrame(self, text="  Confronto  ", bg=C["bg"], fg=C["primary"],
+                            font=("Helvetica", 10, "bold"), relief="groove", bd=1)
+        cf.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
+        cf.columnconfigure(0, weight=1)
 
-        tk.Label(cf,text="Script (.py / .m):",bg=C["bg"],
-                 font=("Helvetica",10)).grid(row=0,column=0,sticky="w",padx=8,pady=(8,2))
-        sf2=tk.Frame(cf,bg=C["bg"]); sf2.grid(row=1,column=0,sticky="ew",padx=8,pady=2)
-        sf2.columnconfigure(0,weight=1)
-        self.vc=tk.StringVar()
-        ttk.Entry(sf2,textvariable=self.vc).grid(row=0,column=0,sticky="ew",padx=(0,4))
-        _btn(sf2,"...",lambda:self._browse(self.vc),color=C["gray"],width=3).grid(row=0,column=1)
-        self.lc_type=tk.Label(cf,text="",bg=C["bg"],font=("Helvetica",9,"italic"),fg=C["muted"])
-        self.lc_type.grid(row=2,column=0,sticky="w",padx=8)
-        self.vc.trace_add("write",lambda *_:self._update_type(self.vc,self.lc_type))
-
-        tk.Label(cf,text="Seleziona ≥2 run con Ctrl+click",
-                 bg=C["bg"],fg=C["muted"],font=("Helvetica",9)).grid(
-            row=3,column=0,sticky="w",padx=8,pady=(6,2))
-        _btn(cf,"▶  Lancia confronto",self._launch_compare,
-             color=C["primary"],width=20).grid(row=4,column=0,sticky="w",padx=8,pady=(8,4))
+        tk.Label(cf, text="Script (.py / .m):", bg=C["bg"],
+                 font=("Helvetica", 10)).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        sf2 = tk.Frame(cf, bg=C["bg"]); sf2.grid(row=1, column=0, sticky="ew", padx=8, pady=2)
+        sf2.columnconfigure(0, weight=1)
+        self.vc = tk.StringVar()
+        ttk.Entry(sf2, textvariable=self.vc).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        _small_btn(sf2, "...", lambda: self._browse(self.vc)).grid(row=0, column=1)
+        self.lc_type = tk.Label(cf, text="", bg=C["bg"], font=("Helvetica", 9, "italic"),
+                                 fg=C["muted"])
+        self.lc_type.grid(row=2, column=0, sticky="w", padx=8)
+        self.vc.trace_add("write", lambda *_: self._update_type(self.vc, self.lc_type))
+        tk.Label(cf, text="Seleziona ≥2 run con Ctrl+click",
+                 bg=C["bg"], fg=C["muted"], font=("Helvetica", 9)).grid(
+            row=3, column=0, sticky="w", padx=8, pady=(6, 2))
+        _btn(cf, "▶  Lancia confronto", self._launch_compare,
+             color=C["primary"], width=20).grid(row=4, column=0, sticky="w", padx=8, pady=(8, 4))
 
         # export figura
-        ef=tk.Frame(cf,bg=C["bg2"]); ef.grid(row=5,column=0,sticky="ew",padx=8,pady=(0,8))
-        ef.columnconfigure(3,weight=1)
-        tk.Label(ef,text="Export figura:",bg=C["bg2"],
-                 font=("Helvetica",9,"bold")).grid(row=0,column=0,columnspan=4,sticky="w",pady=(4,2))
-        tk.Label(ef,text="Fmt:",bg=C["bg2"],font=("Helvetica",9)).grid(row=1,column=0,sticky="w")
-        self.vfmt=tk.StringVar(value=SETTINGS.get("export_format","PNG"))
-        ttk.Combobox(ef,textvariable=self.vfmt,values=["PNG","PDF","SVG"],
-                     state="readonly",width=6).grid(row=1,column=1,sticky="w",padx=4)
-        tk.Label(ef,text="DPI:",bg=C["bg2"],font=("Helvetica",9)).grid(row=1,column=2,sticky="w",padx=(8,0))
-        self.vdpi=tk.StringVar(value=SETTINGS.get("export_dpi","150"))
-        ttk.Entry(ef,textvariable=self.vdpi,width=5).grid(row=1,column=3,sticky="w",padx=4)
-        self.btn_save=_btn(ef,"Salva figura",self._save_fig,color=C["coral"],width=14)
-        self.btn_save.grid(row=2,column=0,columnspan=4,sticky="w",pady=(6,0))
+        ef = tk.Frame(cf, bg=C["bg2"]); ef.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ef.columnconfigure(3, weight=1)
+        tk.Label(ef, text="Export figura:", bg=C["bg2"],
+                 font=("Helvetica", 9, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        tk.Label(ef, text="Fmt:", bg=C["bg2"], font=("Helvetica", 9)).grid(
+            row=1, column=0, sticky="w")
+        self.vfmt = tk.StringVar(value=SETTINGS.get("export_format", "PNG"))
+        ttk.Combobox(ef, textvariable=self.vfmt, values=["PNG", "PDF", "SVG"],
+                     state="readonly", width=6).grid(row=1, column=1, sticky="w", padx=4)
+        tk.Label(ef, text="DPI:", bg=C["bg2"], font=("Helvetica", 9)).grid(
+            row=1, column=2, sticky="w", padx=(8, 0))
+        self.vdpi = tk.StringVar(value=SETTINGS.get("export_dpi", "150"))
+        ttk.Entry(ef, textvariable=self.vdpi, width=5).grid(
+            row=1, column=3, sticky="w", padx=4)
+        self.btn_save = _btn(ef, "Salva figura", self._save_fig, color=C["coral"], width=14)
+        self.btn_save.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
         self.btn_save.config(state="disabled")
-        self.lbl_exp=tk.Label(ef,text="",bg=C["bg2"],fg=C["muted"],font=("Helvetica",9))
-        self.lbl_exp.grid(row=3,column=0,columnspan=4,sticky="w",pady=(2,0))
+        self.lbl_exp = tk.Label(ef, text="", bg=C["bg2"], fg=C["muted"], font=("Helvetica", 9))
+        self.lbl_exp.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         # ── Log ───────────────────────────────────────────────────────────────
-        tk.Label(self,text="Output processo",bg=C["bg"],fg=C["muted"],
-                 font=("Helvetica",9,"bold")).grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,2))
-        self.log=LogBox(self,height=12)
-        self.log.frame.grid(row=2,column=0,columnspan=2,sticky="nsew")
-        self.rowconfigure(2,weight=1)
+        tk.Label(self, text="Output processo", bg=C["bg"], fg=C["muted"],
+                 font=("Helvetica", 9, "bold")).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        self.log = LogBox(self, height=12)
+        self.log.frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.rowconfigure(2, weight=1)
 
-    # helpers
     def _browse(self, var):
-        p=filedialog.askopenfilename(filetypes=[("Script","*.py *.m"),("Tutti","*.*")])
+        p = filedialog.askopenfilename(filetypes=[("Script", "*.py *.m"), ("Tutti", "*.*")])
         if p: var.set(p)
 
     def _update_type(self, var, lbl):
-        ext=Path(var.get()).suffix.lower()
-        lbl.config(**{".py":dict(text="Python",fg=C["teal"]),
-                      ".m": dict(text="MATLAB",fg=C["amber"])}.get(ext,dict(text="",fg=C["muted"])))
+        ext = Path(var.get()).suffix.lower()
+        lbl.config(**{".py": dict(text="Python", fg=C["teal"]),
+                      ".m":  dict(text="MATLAB", fg=C["amber"])
+                      }.get(ext, dict(text="", fg=C["muted"])))
 
     def _files(self):
         if not self.nav: return None
-        fs=self.nav.selected_files()
-        miss=[f for f in fs if not f.exists()]
-        for m in miss: self.log.append(f"File non trovato (dvc pull?): {m}","error")
+        fs = self.nav.selected_files()
+        miss = [f for f in fs if not f.exists()]
+        for m in miss: self.log.append(f"File non trovato (dvc pull?): {m}", "error")
         return None if miss else fs
 
     def _build_cmd(self, script, files):
-        ext=Path(script).suffix.lower()
-        if ext==".py":
-            return [sys.executable,script]+[str(f) for f in files]
-        if ext==".m":
-            matlab=SETTINGS.get("matlab_exe","").strip()
+        ext = Path(script).suffix.lower()
+        if ext == ".py":
+            return [sys.executable, script] + [str(f) for f in files]
+        if ext == ".m":
+            matlab = SETTINGS.get("matlab_exe", "").strip()
             if not matlab:
-                self.log.append("Path matlab.exe non impostato (Impostazioni).","error"); return None
-            sd=str(Path(script).parent).replace("\\","/")
-            sp=str(Path(script)).replace("\\","/")
-            fc="{"+"".join(f"'{str(f).replace(chr(92),'/')}'" for f in files)+"}"
-            return [matlab,"-batch",
+                self.log.append("Path matlab.exe non impostato (Impostazioni).", "error")
+                return None
+            sd = str(Path(script).parent).replace("\\", "/")
+            sp = str(Path(script)).replace("\\", "/")
+            fc = "{" + ", ".join(f"'{str(f).replace(chr(92), '/')}'" for f in files) + "}"
+            return [matlab, "-batch",
                     f"addpath('{sd}'); assignin('base','data_files',{fc}); run('{sp}');"]
-        self.log.append(f"Estensione non supportata: {ext}","error"); return None
+        self.log.append(f"Estensione non supportata: {ext}", "error")
+        return None
 
     def _exec(self, script, files, export_path=""):
-        cmd=self._build_cmd(script,files)
+        cmd = self._build_cmd(script, files)
         if not cmd: return
-        env=os.environ.copy()
-        if export_path: env["TESTLAB_EXPORT_PATH"]=export_path
-        self.log.append("Lancio: "+" ".join(str(c) for c in cmd),"info")
+        env = os.environ.copy()
+        if export_path: env["TESTLAB_EXPORT_PATH"] = export_path
+        self.log.append("Lancio: " + " ".join(str(c) for c in cmd), "info")
         def task():
             try:
-                proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                                      text=True,cwd=str(Path(script).parent),env=env)
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=str(Path(script).parent), env=env)
                 for line in proc.stdout:
-                    line=line.rstrip()
-                    if line: self.log.append(line,"info")
+                    line = line.rstrip()
+                    if line: self.log.append(line, "info")
                 proc.wait()
-                if proc.returncode==0:
-                    self.log.append("Script terminato correttamente.","success")
+                if proc.returncode == 0:
+                    self.log.append("Script terminato correttamente.", "success")
                     if export_path and Path(export_path).exists():
-                        self._last_fig=Path(export_path)
+                        self._last_fig = Path(export_path)
                         self.btn_save.config(state="normal")
-                        self.lbl_exp.config(text=f"Pronta: {Path(export_path).name}",fg=C["teal"])
+                        self.lbl_exp.config(
+                            text=f"Pronta: {Path(export_path).name}", fg=C["teal"])
                 else:
-                    self.log.append(f"Exit {proc.returncode}.","error")
-            except Exception as e: self.log.append(str(e),"error")
-        threading.Thread(target=task,daemon=True).start()
+                    self.log.append(f"Exit {proc.returncode}.", "error")
+            except Exception as e: self.log.append(str(e), "error")
+        threading.Thread(target=task, daemon=True).start()
 
     def _launch_analysis(self):
-        sc=self.va.get().strip()
-        if not sc: self.log.append("Seleziona uno script di analisi.","warning"); return
-        fs=self._files()
+        sc = self.va.get().strip()
+        if not sc: self.log.append("Seleziona uno script di analisi.", "warning"); return
+        fs = self._files()
         if fs is None: return
-        if not fs: self.log.append("Seleziona almeno un run.","warning"); return
-        self._exec(sc,fs)
+        if not fs: self.log.append("Seleziona almeno un run.", "warning"); return
+        self._exec(sc, fs)
 
     def _launch_compare(self):
-        sc=self.vc.get().strip()
-        if not sc: self.log.append("Seleziona uno script di confronto.","warning"); return
-        fs=self._files()
+        sc = self.vc.get().strip()
+        if not sc: self.log.append("Seleziona uno script di confronto.", "warning"); return
+        fs = self._files()
         if fs is None: return
-        if len(fs)<2: self.log.append("Seleziona almeno 2 run per il confronto.","warning"); return
-        proj=self.nav.cur_project() if self.nav else "unknown"
-        ts=datetime.now().strftime("%Y%m%d_%H%M%S")
-        fmt=self.vfmt.get().lower()
-        ed=CODE_ROOT/"projects"/proj/"exports"; ed.mkdir(parents=True,exist_ok=True)
-        ep=str(ed/f"confronto_{ts}.{fmt}")
+        if len(fs) < 2: self.log.append("Seleziona almeno 2 run.", "warning"); return
+        proj = self.nav.cur_project() if self.nav else "unknown"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fmt = self.vfmt.get().lower()
+        ed = CODE_ROOT / "projects" / proj / "exports"; ed.mkdir(parents=True, exist_ok=True)
+        ep = str(ed / f"confronto_{ts}.{fmt}")
         self.btn_save.config(state="disabled")
-        self.lbl_exp.config(text="In attesa...",fg=C["muted"])
-        self._exec(sc,fs,export_path=ep)
+        self.lbl_exp.config(text="In attesa...", fg=C["muted"])
+        self._exec(sc, fs, export_path=ep)
 
     def _save_fig(self):
         if not self._last_fig or not self._last_fig.exists():
-            messagebox.showwarning("TestLab","Nessuna figura disponibile."); return
-        fmt=self.vfmt.get().lower(); dpi=self.vdpi.get().strip() or "150"
-        proj=self.nav.cur_project() if self.nav else ""
-        init=str(CODE_ROOT/"projects"/proj/"exports") if proj else str(CODE_ROOT/"exports")
-        dest_dir=filedialog.askdirectory(title="Cartella di destinazione",initialdir=init)
+            messagebox.showwarning("TestLab", "Nessuna figura disponibile."); return
+        fmt = self.vfmt.get().lower(); dpi = self.vdpi.get().strip() or "150"
+        proj = self.nav.cur_project() if self.nav else ""
+        init = str(CODE_ROOT / "projects" / proj / "exports") if proj else str(CODE_ROOT / "exports")
+        dest_dir = filedialog.askdirectory(title="Cartella di destinazione", initialdir=init)
         if not dest_dir: return
-        ts=datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest=Path(dest_dir)/f"confronto_{ts}.{fmt}"
-        dest.parent.mkdir(parents=True,exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = Path(dest_dir) / f"confronto_{ts}.{fmt}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            if self._last_fig.suffix.lower()==f".{fmt}":
-                shutil.copy2(self._last_fig,dest)
+            if self._last_fig.suffix.lower() == f".{fmt}":
+                shutil.copy2(self._last_fig, dest)
             else:
                 try:
                     from PIL import Image
-                    Image.open(self._last_fig).save(str(dest),dpi=(int(dpi),int(dpi)))
+                    Image.open(self._last_fig).save(str(dest), dpi=(int(dpi), int(dpi)))
                 except ImportError:
-                    shutil.copy2(self._last_fig,dest)
-            self.lbl_exp.config(text=f"Salvata: {dest.name}",fg=C["teal"])
-            messagebox.showinfo("TestLab",f"Figura salvata in:\n{dest}")
-        except Exception as e: messagebox.showerror("TestLab",str(e))
+                    shutil.copy2(self._last_fig, dest)
+            self.lbl_exp.config(text=f"Salvata: {dest.name}", fg=C["teal"])
+            messagebox.showinfo("TestLab", f"Figura salvata in:\n{dest}")
+        except Exception as e: messagebox.showerror("TestLab", str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -669,93 +991,99 @@ class LauncherPanel(tk.Frame):
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("TestLab"); self.geometry("1120x740"); self.minsize(900,600)
+        self.title("TestLab"); self.geometry("1140x760"); self.minsize(900, 600)
         self.configure(bg=C["bg"])
         self._style(); self._menu(); self._body()
 
     def _style(self):
-        s=ttk.Style(self); s.theme_use("clam")
-        s.configure("TFrame",background=C["bg"])
-        s.configure("TEntry",fieldbackground=C["white"])
-        s.configure("TCombobox",fieldbackground=C["white"])
-        s.configure("TSeparator",background=C["border"])
-        s.configure("Treeview",background=C["white"],fieldbackground=C["white"],
-                    rowheight=24,font=("Helvetica",10))
-        s.configure("Treeview.Heading",background=C["bg2"],foreground=C["text"],
-                    font=("Helvetica",10,"bold"))
+        s = ttk.Style(self); s.theme_use("clam")
+        s.configure("TFrame", background=C["bg"])
+        s.configure("TEntry", fieldbackground=C["white"])
+        s.configure("TCombobox", fieldbackground=C["white"])
+        s.configure("TSeparator", background=C["border"])
+        s.configure("Treeview", background=C["white"], fieldbackground=C["white"],
+                    rowheight=24, font=("Helvetica", 10))
+        s.configure("Treeview.Heading", background=C["bg2"], foreground=C["text"],
+                    font=("Helvetica", 10, "bold"))
 
     def _menu(self):
-        mb=tk.Menu(self,bg=C["bg2"],fg=C["text"],relief="flat",font=("Helvetica",10))
-        # File
-        mf=tk.Menu(mb,tearoff=0,bg=C["white"],fg=C["text"],font=("Helvetica",10))
-        mf.add_command(label="Nuovo progetto…",command=self._new_proj)
-        mf.add_command(label="Nuovo testtype…",command=self._new_tt)
+        mb = tk.Menu(self, bg=C["bg2"], fg=C["text"], relief="flat", font=("Helvetica", 10))
+        mf = tk.Menu(mb, tearoff=0, bg=C["white"], fg=C["text"], font=("Helvetica", 10))
+        mf.add_command(label="Nuovo progetto…",  command=self._new_proj)
+        mf.add_command(label="Nuovo testtype…",  command=self._new_tt)
         mf.add_separator()
-        mf.add_command(label="Impostazioni…",command=lambda:DlgSettings(self))
+        mf.add_command(label="Impostazioni…",    command=lambda: DlgSettings(self))
         mf.add_separator()
-        mf.add_command(label="Esci",command=self.quit)
-        mb.add_cascade(label="File",menu=mf)
-        # Dati
-        md=tk.Menu(mb,tearoff=0,bg=C["white"],fg=C["text"],font=("Helvetica",10))
-        md.add_command(label="Importa run…",command=lambda:DlgImportRun(self))
-        md.add_command(label="Esplora run…",command=lambda:DlgExploreRuns(self))
-        mb.add_cascade(label="Dati",menu=md)
-        # Git/DVC
-        mg=tk.Menu(mb,tearoff=0,bg=C["white"],fg=C["text"],font=("Helvetica",10))
-        mg.add_command(label="Apri pannello Git / DVC…",command=lambda:DlgGitDVC(self))
-        mb.add_cascade(label="Git / DVC",menu=mg)
+        mf.add_command(label="Esci",             command=self.quit)
+        mb.add_cascade(label="File", menu=mf)
+
+        md = tk.Menu(mb, tearoff=0, bg=C["white"], fg=C["text"], font=("Helvetica", 10))
+        md.add_command(label="Importa run…",     command=self._import_run)
+        md.add_command(label="Esplora run…",     command=lambda: DlgExploreRuns(self))
+        mb.add_cascade(label="Dati", menu=md)
+
+        mg = tk.Menu(mb, tearoff=0, bg=C["white"], fg=C["text"], font=("Helvetica", 10))
+        mg.add_command(label="Apri pannello Git / DVC…", command=lambda: DlgGitDVC(self))
+        mb.add_cascade(label="Git / DVC", menu=mg)
         self.config(menu=mb)
 
     def _body(self):
-        # header
-        hdr=tk.Frame(self,bg=C["primary"],height=44)
+        hdr = tk.Frame(self, bg=C["primary"], height=44)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr,text="  TestLab",bg=C["primary"],fg="white",
-                 font=("Helvetica",15,"bold")).pack(side="left",padx=12)
-        tk.Label(hdr,text=str(CODE_ROOT),bg=C["primary"],fg="#C4C0F0",
-                 font=("Helvetica",9)).pack(side="left")
-        # body
-        body=tk.Frame(self,bg=C["bg"]); body.pack(fill="both",expand=True,padx=10,pady=10)
-        body.rowconfigure(0,weight=1); body.columnconfigure(2,weight=1)
+        tk.Label(hdr, text="  TestLab", bg=C["primary"], fg="white",
+                 font=("Helvetica", 15, "bold")).pack(side="left", padx=12)
+        tk.Label(hdr, text=str(CODE_ROOT), bg=C["primary"], fg="#C4C0F0",
+                 font=("Helvetica", 9)).pack(side="left")
 
-        self.nav=NavPanel(body,on_change=self._on_sel)
-        self.nav.grid(row=0,column=0,sticky="ns",padx=(0,0))
+        body = tk.Frame(self, bg=C["bg"]); body.pack(fill="both", expand=True, padx=10, pady=10)
+        body.rowconfigure(0, weight=1); body.columnconfigure(2, weight=1)
 
-        tk.Frame(body,bg=C["border"],width=1).grid(row=0,column=1,sticky="ns",padx=8)
+        self.nav = NavPanel(body, on_change=self._on_sel)
+        self.nav.grid(row=0, column=0, sticky="ns")
 
-        self.launcher=LauncherPanel(body)
-        self.launcher.nav=self.nav
-        self.launcher.grid(row=0,column=2,sticky="nsew")
+        tk.Frame(body, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns", padx=8)
 
-    def _on_sel(self, ids, proj, tt):
-        pass   # placeholder — si può usare per aggiornare una status bar
+        self.launcher = LauncherPanel(body)
+        self.launcher.nav = self.nav
+        self.launcher.grid(row=0, column=2, sticky="nsew")
+
+        # collegamento bidirezionale nav ↔ launcher (per click su script label)
+        self.nav._launcher_ref = self.launcher
+
+    def _on_sel(self, ids, proj, tt): pass
+
+    def _import_run(self):
+        DlgImportRun(self, nav_ref=self.nav)
 
     def _new_proj(self):
-        dlg=DlgNewProject(self)
+        dlg = DlgNewProject(self)
         if not dlg.result: return
-        name,desc,dvc=dlg.result
+        name, desc, dvc = dlg.result
         try:
-            db.add_project(name,desc,dvc)
-            fm.write_project_config(ProjectConfig(name=name,description=desc,dvc_remote=dvc))
-            self.nav.refresh()
-            messagebox.showinfo("TestLab",f"Progetto '{name}' creato.")
-        except Exception as e: messagebox.showerror("TestLab",str(e))
+            db.add_project(name, desc, dvc)
+            fm.write_project_config(ProjectConfig(name=name, description=desc, dvc_remote=dvc))
+            self.nav.full_refresh()
+            messagebox.showinfo("TestLab", f"Progetto '{name}' creato.")
+        except Exception as e: messagebox.showerror("TestLab", str(e))
 
     def _new_tt(self):
-        projs=[p["name"] for p in db.list_projects()]
-        dlg=DlgNewTesttype(self,projs)
+        projs = [p["name"] for p in db.list_projects()]
+        dlg = DlgNewTesttype(self, projs)
         if not dlg.result: return
-        proj,name,analysis,compare=dlg.result
+        proj, name, analysis, compare = dlg.result
         try:
-            db.add_testtype(proj,name,analysis or name)
-            cfg=fm.read_project_config(proj)
-            cfg.testtypes[name]=analysis or name
-            d=cfg.to_dict(); d.setdefault("compare_scripts",{})[name]=compare
-            (CODE_ROOT/"projects"/proj/"project.json").write_text(
-                json.dumps(d,indent=2,ensure_ascii=False))
-            self.nav._on_proj()
-            messagebox.showinfo("TestLab",f"TestType '{name}' aggiunto.")
-        except Exception as e: messagebox.showerror("TestLab",str(e))
+            db.add_testtype(proj, name, analysis or name)
+            cfg = fm.read_project_config(proj)
+            cfg.testtypes[name] = analysis or name
+            d = cfg.to_dict()
+            (CODE_ROOT / "projects" / proj / "project.json").write_text(
+                json.dumps(d, indent=2, ensure_ascii=False))
+            # salva gli script nel registry
+            if analysis or compare:
+                set_scripts(proj, name, analysis, compare)
+            self.nav.full_refresh()
+            messagebox.showinfo("TestLab", f"TestType '{name}' aggiunto.")
+        except Exception as e: messagebox.showerror("TestLab", str(e))
 
 
 if __name__ == "__main__":
