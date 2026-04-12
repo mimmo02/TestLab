@@ -1,0 +1,10 @@
+{
+  "run_id": "001",
+  "project": "FirstTrial",
+  "testtype": "test1",
+  "condition": "sin",
+  "date": "2026-04-12T14:13:13",
+  "notes": "",
+  "tags": [],
+  "extra": {}
+}

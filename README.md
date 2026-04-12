@@ -95,3 +95,19 @@ testlab-code/
 testlab-data/
 └── projects/                       # storage fisico CSV/dati
 ```
+
+## Salvataggio figure
+
+Da implementare nei tuoi script di plot, invece di usare `plt.show()` o `fig.show()`, utilizza la funzione `save_figure` importata da `testlab.export_helper`. Questo assicura che tutte le figure vengano salvate in modo coerente all'interno del progetto, facilitando la gestione e l'organizzazione dei risultati.
+
+Python
+```python
+from testlab.export_helper import save_figure
+# ... il tuo codice di plot ...
+save_figure(fig)   # invece di plt.show() o fig.show()
+```
+MATLAB
+```matlab
+% ... il tuo codice di plot ...
+testlab_save_figure(gcf)
+```

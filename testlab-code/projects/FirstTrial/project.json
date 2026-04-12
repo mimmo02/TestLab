@@ -1,0 +1,12 @@
+{
+  "name": "FirstTrial",
+  "description": "TestLab validation",
+  "testtypes": {
+    "test1": "C:/Users/Aquil/Downloads/plot_single.py"
+  },
+  "created": "",
+  "dvc_remote": "",
+  "compare_scripts": {
+    "test1": "C:/Users/Aquil/Downloads/plot_all.py"
+  }
+}
